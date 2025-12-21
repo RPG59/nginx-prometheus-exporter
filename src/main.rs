@@ -1,4 +1,4 @@
-use axum::{routing::get, Router};
+use axum::{http::StatusCode, routing::get, Router};
 use clap::Parser;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -13,7 +13,7 @@ struct Args {
     #[arg(short, long, default_value = "/var/log/nginx/access.log")]
     log_path: PathBuf,
 
-    #[arg(short, long, default_value = "9090")]
+    #[arg(short, long, default_value = "6969")]
     port: u16,
 }
 
@@ -59,9 +59,25 @@ struct MetricLabels {
     host: String,
 }
 
+fn get_status_label(status_code: String) -> Result<&'static str, String> {
+    let status = status_code
+        .parse::<u16>()
+        .map_err(|e| format!("Failed to parse status_code. Error: {}", e))?;
+
+    match status {
+        100..=199 => Ok("1xx"),
+        200..=299 => Ok("2xx"),
+        300..=399 => Ok("3xx"),
+        400..=499 => Ok("4xx"),
+        500..=599 => Ok("5xx"),
+        _ => Err("Unknown status code".to_string()),
+    }
+}
+
 struct MetricsState {
     log_path: PathBuf,
     file_position: u64,
+    metrics: HashMap<MetricLabels, Vec<f64>>,
 }
 
 impl MetricsState {
@@ -69,12 +85,14 @@ impl MetricsState {
         Self {
             log_path,
             file_position: 0,
+            metrics: HashMap::new(),
         }
     }
 
+    // TODO: rotation access.log file
     fn read_new_entries(&mut self) -> Result<HashMap<MetricLabels, Vec<f64>>, String> {
-        let file = File::open(&self.log_path)
-            .map_err(|e| format!("Failed to open log file: {}", e))?;
+        let file =
+            File::open(&self.log_path).map_err(|e| format!("Failed to open log file: {}", e))?;
 
         let mut reader = BufReader::new(file);
 
@@ -82,7 +100,6 @@ impl MetricsState {
             .seek(SeekFrom::Start(self.file_position))
             .map_err(|e| format!("Failed to seek to position: {}", e))?;
 
-        let mut metrics: HashMap<MetricLabels, Vec<f64>> = HashMap::new();
         let mut line = String::new();
 
         loop {
@@ -101,10 +118,14 @@ impl MetricsState {
                             let labels = MetricLabels {
                                 method: entry.nginx.access.method,
                                 path: entry.nginx.access.url,
-                                status_code: entry.http.response.status_code,
+                                status_code: get_status_label(entry.http.response.status_code)?
+                                    .to_string(),
                                 host: entry.nginx.access.host,
                             };
-                            metrics.entry(labels).or_insert_with(Vec::new).push(duration);
+                            self.metrics
+                                .entry(labels)
+                                .or_insert_with(Vec::new)
+                                .push(duration);
                         }
                     }
                     Err(e) => {
@@ -117,7 +138,7 @@ impl MetricsState {
             line.clear();
         }
 
-        Ok(metrics)
+        Ok(self.metrics.clone())
     }
 }
 
@@ -130,34 +151,31 @@ fn calculate_quantile(sorted_data: &[f64], quantile: f64) -> f64 {
     sorted_data[index]
 }
 
-async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> String {
+async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String) {
+    println!("Access");
     let mut state = state.lock().unwrap();
 
     let metrics_map = match state.read_new_entries() {
         Ok(m) => m,
         Err(e) => {
             eprintln!("Error reading log entries: {}", e);
-            return format!("# Error: {}\n", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("# Error: {}\n", e),
+            );
         }
     };
 
-    if metrics_map.is_empty() {
-        return String::from(
-            "# HELP nginx_http_request_duration_seconds Request duration in seconds\n\
-             # TYPE nginx_http_request_duration_seconds summary\n"
-        );
-    }
-
-    let mut output = String::from(
-        "# HELP nginx_http_request_duration_seconds Request duration in seconds\n\
-         # TYPE nginx_http_request_duration_seconds summary\n"
-    );
+    let mut output: Vec<String> = vec![
+        "# HELP nginx_http_request_duration_seconds Request duration in seconds".to_string(),
+        "# TYPE nginx_http_request_duration_seconds summary".to_string(),
+    ];
 
     for (labels, durations) in metrics_map.iter() {
         let sum: f64 = durations.iter().sum();
         let count = durations.len();
-
         let mut sorted_durations = durations.clone();
+
         sorted_durations.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let p50 = calculate_quantile(&sorted_durations, 0.50);
@@ -170,33 +188,33 @@ async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> String {
             labels.method, labels.path, labels.status_code, labels.host
         );
 
-        output.push_str(&format!(
-            "nginx_http_request_duration_seconds_sum{{{}}} {}\n",
+        output.push(format!(
+            "nginx_http_request_duration_seconds_sum{{{}}} {}",
             label_str, sum
         ));
-        output.push_str(&format!(
-            "nginx_http_request_duration_seconds_count{{{}}} {}\n",
+        output.push(format!(
+            "nginx_http_request_duration_seconds_count{{{}}} {}",
             label_str, count
         ));
-        output.push_str(&format!(
-            "nginx_http_request_duration_seconds{{{},quantile=\"0.5\"}} {}\n",
+        output.push(format!(
+            "nginx_http_request_duration_seconds_p50{{{}}} {}",
             label_str, p50
         ));
-        output.push_str(&format!(
-            "nginx_http_request_duration_seconds{{{},quantile=\"0.9\"}} {}\n",
+        output.push(format!(
+            "nginx_http_request_duration_seconds_p90{{{}}} {}",
             label_str, p90
         ));
-        output.push_str(&format!(
-            "nginx_http_request_duration_seconds{{{},quantile=\"0.95\"}} {}\n",
+        output.push(format!(
+            "nginx_http_request_duration_seconds_p95{{{}}} {}",
             label_str, p95
         ));
-        output.push_str(&format!(
-            "nginx_http_request_duration_seconds{{{},quantile=\"0.99\"}} {}\n",
+        output.push(format!(
+            "nginx_http_request_duration_seconds_p99{{{}}} {}",
             label_str, p99
         ));
     }
 
-    output
+    (StatusCode::OK, output.join("\n"))
 }
 
 #[tokio::main]

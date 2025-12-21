@@ -1,3 +1,4 @@
 /target
 test_access.log
 *.log
+/docker/logs/
