@@ -7,10 +7,16 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/*
+TODO:
+- logger
+- multiple access.log files
+ */
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Nginx Prometheus Exporter", long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "/var/log/nginx/access.log")]
+    #[arg(short, long, default_value = "./docker/logs/access.log")]
     log_path: PathBuf,
 
     #[arg(short, long, default_value = "6969")]
@@ -151,8 +157,33 @@ fn calculate_quantile(sorted_data: &[f64], quantile: f64) -> f64 {
     sorted_data[index]
 }
 
+fn exponential_buckets(start: f64, factor: f64, count: usize) -> Vec<f64> {
+    let mut buckets = Vec::with_capacity(count);
+    let mut current = start;
+
+    for _ in 0..count {
+        buckets.push(current);
+        current *= factor;
+    }
+
+    buckets
+}
+
+fn calculate_histogram_buckets(data: &[f64], buckets: &[f64]) -> Vec<usize> {
+    let mut counts = vec![0; buckets.len()];
+
+    for &value in data {
+        for (i, &bucket) in buckets.iter().enumerate() {
+            if value <= bucket {
+                counts[i] += 1;
+            }
+        }
+    }
+
+    counts
+}
+
 async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String) {
-    println!("Access");
     let mut state = state.lock().unwrap();
 
     let metrics_map = match state.read_new_entries() {
@@ -166,9 +197,11 @@ async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String
         }
     };
 
+    let buckets = exponential_buckets(0.05, 2.0, 10);
+
     let mut output: Vec<String> = vec![
         "# HELP nginx_http_request_duration_seconds Request duration in seconds".to_string(),
-        "# TYPE nginx_http_request_duration_seconds summary".to_string(),
+        "# TYPE nginx_http_request_duration_seconds histogram".to_string(),
     ];
 
     for (labels, durations) in metrics_map.iter() {
@@ -178,39 +211,37 @@ async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String
 
         sorted_durations.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        let p50 = calculate_quantile(&sorted_durations, 0.50);
-        let p90 = calculate_quantile(&sorted_durations, 0.90);
-        let p95 = calculate_quantile(&sorted_durations, 0.95);
-        let p99 = calculate_quantile(&sorted_durations, 0.99);
+        // Calculate histogram buckets
+        let bucket_counts = calculate_histogram_buckets(durations, &buckets);
 
         let label_str = format!(
             "method=\"{}\",path=\"{}\",status_code=\"{}\",host=\"{}\"",
             labels.method, labels.path, labels.status_code, labels.host
         );
 
+        // Output histogram buckets
+        for (i, &bucket_limit) in buckets.iter().enumerate() {
+            output.push(format!(
+                "nginx_http_request_duration_seconds_bucket{{{},le=\"{}\"}} {}",
+                label_str, bucket_limit, bucket_counts[i]
+            ));
+        }
+
+        // Add +Inf bucket (all values)
+        output.push(format!(
+            "nginx_http_request_duration_seconds_bucket{{{},le=\"+Inf\"}} {}",
+            label_str, count
+        ));
+
+        // Output sum and count
         output.push(format!(
             "nginx_http_request_duration_seconds_sum{{{}}} {}",
             label_str, sum
         ));
+
         output.push(format!(
             "nginx_http_request_duration_seconds_count{{{}}} {}",
             label_str, count
-        ));
-        output.push(format!(
-            "nginx_http_request_duration_seconds_p50{{{}}} {}",
-            label_str, p50
-        ));
-        output.push(format!(
-            "nginx_http_request_duration_seconds_p90{{{}}} {}",
-            label_str, p90
-        ));
-        output.push(format!(
-            "nginx_http_request_duration_seconds_p95{{{}}} {}",
-            label_str, p95
-        ));
-        output.push(format!(
-            "nginx_http_request_duration_seconds_p99{{{}}} {}",
-            label_str, p99
         ));
     }
 

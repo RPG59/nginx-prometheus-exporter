@@ -1,99 +1,118 @@
 # Nginx Prometheus Exporter
 
-Prometheus exporter для метрик nginx, который читает логи в JSON формате и предоставляет метрики времени ответа.
+Prometheus exporter for nginx metrics that reads logs in JSON format and provides response time metrics.
 
-## Возможности
+## Features
 
-- Чтение логов nginx в JSON формате
-- Отслеживание позиции в файле (читает только новые записи при каждом запросе)
-- Вычисление метрик `nginx_http_request_duration_seconds`:
-  - `_sum` - сумма времени всех запросов
-  - `_count` - количество запросов
-  - Квантили: p50, p90, p95, p99
-- Конфигурируемый путь к лог-файлу и порт сервера
+- Read nginx logs in JSON format
+- Track position in file (reads only new entries on each request)
+- Calculate `nginx_http_request_duration_seconds` metrics:
+  - `_sum` - total time of all requests
+  - `_count` - number of requests
+  - Quantiles: p50, p90, p95, p99
+- Configurable log file path and server port
 
-## Сборка
+## Build
 
 ```bash
 cargo build --release
 ```
 
-## Использование
+## Usage
 
-### Запуск с параметрами по умолчанию
+### Run with default parameters
 
 ```bash
 cargo run --release
 ```
 
-По умолчанию:
-- Путь к логу: `/var/log/nginx/access.log`
-- Порт сервера: `9090`
+Defaults:
+- Log path: `/var/log/nginx/access.log`
+- Server port: `9090`
 
-### Запуск с пользовательскими параметрами
+### Run with custom parameters
 
 ```bash
 cargo run --release -- --log-path /path/to/nginx/access.log --port 9191
 ```
 
-или
+or
 
 ```bash
-./target/release/frontend-infra-nginx-exporter -l /path/to/nginx/access.log -p 9191
+./target/release/nginx-prometheus-exporter -l /path/to/nginx/access.log -p 9191
 ```
 
-### Параметры командной строки
+### Command line parameters
 
-- `-l, --log-path <LOG_PATH>` - путь к файлу логов nginx (по умолчанию: `/var/log/nginx/access.log`)
-- `-p, --port <PORT>` - порт HTTP сервера (по умолчанию: `9090`)
-- `-h, --help` - показать справку
-- `-V, --version` - показать версию
+- `-l, --log-path <LOG_PATH>` - path to nginx log file (default: `/var/log/nginx/access.log`)
+- `-p, --port <PORT>` - HTTP server port (default: `9090`)
+- `-h, --help` - show help
+- `-V, --version` - show version
 
-## Формат метрик
+## Metrics format
 
-Эндпоинт `/metrics` возвращает метрики в формате Prometheus с лейблами:
+The `/metrics` endpoint returns metrics in Prometheus histogram format with labels:
 
 ```
 # HELP nginx_http_request_duration_seconds Request duration in seconds
-# TYPE nginx_http_request_duration_seconds summary
-nginx_http_request_duration_seconds_sum{method="GET",path="/api/users",status_code="200",host="api.example.com"} 0.275
-nginx_http_request_duration_seconds_count{method="GET",path="/api/users",status_code="200",host="api.example.com"} 2
-nginx_http_request_duration_seconds{method="GET",path="/api/users",status_code="200",host="api.example.com",quantile="0.5"} 0.15
-nginx_http_request_duration_seconds{method="GET",path="/api/users",status_code="200",host="api.example.com",quantile="0.9"} 0.15
-nginx_http_request_duration_seconds{method="GET",path="/api/users",status_code="200",host="api.example.com",quantile="0.95"} 0.15
-nginx_http_request_duration_seconds{method="GET",path="/api/users",status_code="200",host="api.example.com",quantile="0.99"} 0.15
+# TYPE nginx_http_request_duration_seconds histogram
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="0.005"} 0
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="0.01"} 0
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="0.02"} 0
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="0.04"} 0
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="0.08"} 0
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="0.16"} 2
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="0.32"} 3
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="0.64"} 3
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="1.28"} 3
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="2.56"} 3
+nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="+Inf"} 3
+nginx_http_request_duration_seconds_sum{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.475
+nginx_http_request_duration_seconds_count{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 3
+nginx_http_request_duration_seconds_p50{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.15
+nginx_http_request_duration_seconds_p90{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.2
+nginx_http_request_duration_seconds_p95{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.2
+nginx_http_request_duration_seconds_p99{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.2
 ```
 
-### Лейблы
+### Labels
 
-Каждая метрика содержит следующие лейблы:
-- `method` - HTTP метод запроса (GET, POST, PUT, DELETE и т.д.)
-- `path` - URL путь запроса
-- `status_code` - HTTP код ответа (200, 404, 500 и т.д.)
-- `host` - имя хоста из запроса
+Each metric contains the following labels:
+- `method` - HTTP request method (GET, POST, PUT, DELETE, etc.)
+- `path` - URL path of the request
+- `status_code` - HTTP response code grouped (1xx, 2xx, 3xx, 4xx, 5xx)
+- `host` - hostname from the request
 
-## Формат логов nginx
+### Metric types
 
-Экспортер ожидает логи в JSON формате, как указано в `nginx_log_format.conf`.
-Критически важное поле: `nginx.time.request` - время обработки запроса в секундах.
+For each label combination, the exporter provides:
+- **Histogram buckets** (`_bucket`) - exponential distribution with buckets [0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, +Inf] seconds
+- **Sum** (`_sum`) - total time of all requests
+- **Count** (`_count`) - number of requests
+- **Percentiles** (`_p50`, `_p90`, `_p95`, `_p99`) - quantiles of response time distribution
 
-## Тестирование
+## Nginx log format
 
-Для тестирования можно использовать предоставленный файл `test_access.log`:
+The exporter expects logs in JSON format, as specified in `nginx_log_format.conf`.
+Critical field: `nginx.time.request` - request processing time in seconds.
+
+## Testing
+
+For testing, you can use the provided `test_access.log` file:
 
 ```bash
 cargo run -- --log-path test_access.log --port 9191
 ```
 
-Затем в другом терминале:
+Then in another terminal:
 
 ```bash
 curl http://localhost:9191/metrics
 ```
 
-## Конфигурация Prometheus
+## Prometheus configuration
 
-Добавьте в `prometheus.yml`:
+Add to `prometheus.yml`:
 
 ```yaml
 scrape_configs:
@@ -102,10 +121,11 @@ scrape_configs:
       - targets: ['localhost:9090']
 ```
 
-## Архитектура
+## Architecture
 
-- **Отслеживание позиции**: экспортер хранит позицию последнего прочитанного байта в файле, поэтому при каждом запросе к `/metrics` обрабатываются только новые записи
-- **Парсинг JSON**: использует `serde_json` для парсинга логов nginx и извлечения необходимых полей (method, path, status_code, host, request_time)
-- **Группировка по лейблам**: метрики группируются по уникальным комбинациям лейблов (method, path, status_code, host) с использованием HashMap
-- **Вычисление квантилей**: квантили вычисляются на основе отсортированных данных из текущего набора новых записей для каждой группы лейблов
-- **Асинхронный HTTP сервер**: построен на `axum` и `tokio`
+- **Position tracking**: the exporter stores the position of the last read byte in the file, so each request to `/metrics` processes only new entries
+- **JSON parsing**: uses `serde_json` to parse nginx logs and extract necessary fields (method, path, status_code, host, request_time)
+- **Label grouping**: metrics are grouped by unique label combinations (method, path, status_code, host) using HashMap
+- **Histogram buckets**: uses exponential bucket distribution (ExponentialBuckets) with initial value 0.005s, factor 2.0 and 10 buckets, giving a range from 5ms to 2.56s
+- **Quantile calculation**: quantiles (p50, p90, p95, p99) are calculated based on sorted data from the current set of new entries for each label group
+- **Asynchronous HTTP server**: built on `axum` and `tokio`
