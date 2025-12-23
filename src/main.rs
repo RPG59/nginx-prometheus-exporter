@@ -1,23 +1,26 @@
-use axum::{http::StatusCode, routing::get, Router};
+use axum::middleware;
+use axum::{http::HeaderValue, http::StatusCode, response::Response, routing::get, Router};
 use clap::Parser;
+use glob::glob;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /*
 TODO:
 - logger
-- multiple access.log files
+- version command
  */
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Nginx Prometheus Exporter", long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "./docker/logs/access.log")]
-    log_path: PathBuf,
+    #[arg(short, long, default_value = "./docker/logs/*.log")]
+    log_path: String,
 
     #[arg(short, long, default_value = "6969")]
     port: u16,
@@ -80,68 +83,114 @@ fn get_status_label(status_code: String) -> Result<&'static str, String> {
     }
 }
 
-struct MetricsState {
-    log_path: PathBuf,
+struct LogFileMeta {
     file_position: u64,
+    inode: u64,
+}
+
+struct MetricsState {
+    log_files: HashMap<PathBuf, LogFileMeta>,
     metrics: HashMap<MetricLabels, Vec<f64>>,
+    pattern: String,
 }
 
 impl MetricsState {
-    fn new(log_path: PathBuf) -> Self {
+    fn new(pattern: String) -> Self {
         Self {
-            log_path,
-            file_position: 0,
+            log_files: HashMap::new(),
             metrics: HashMap::new(),
+            pattern,
         }
     }
 
-    // TODO: rotation access.log file
+    fn update_files_map(&mut self) {
+        for entry in glob(&self.pattern).expect("Failed to read glob pattern") {
+            match entry {
+                Ok(path) => {
+                    if let Some(_) = self.log_files.get(&path) {
+                        continue;
+                    }
+
+                    let inode = std::fs::metadata(&path).unwrap().ino();
+
+                    self.log_files.insert(
+                        path,
+                        LogFileMeta {
+                            file_position: 0,
+                            inode,
+                        },
+                    );
+                }
+                Err(e) => println!("{:?}", e),
+            }
+        }
+    }
+
+    fn check_file_rotation(path: &PathBuf, meta: &LogFileMeta) -> Result<bool, String> {
+        let metadata =
+            std::fs::metadata(path).map_err(|e| format!("Failed to get file metadata: {}", e))?;
+
+        if meta.inode != metadata.ino() || meta.file_position > metadata.len() {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
     fn read_new_entries(&mut self) -> Result<HashMap<MetricLabels, Vec<f64>>, String> {
-        let file =
-            File::open(&self.log_path).map_err(|e| format!("Failed to open log file: {}", e))?;
-
-        let mut reader = BufReader::new(file);
-
-        reader
-            .seek(SeekFrom::Start(self.file_position))
-            .map_err(|e| format!("Failed to seek to position: {}", e))?;
-
-        let mut line = String::new();
-
-        loop {
-            let bytes_read = reader
-                .read_line(&mut line)
-                .map_err(|e| format!("Failed to read line: {}", e))?;
-
-            if bytes_read == 0 {
-                break;
+        for (path, meta) in &mut self.log_files {
+            if MetricsState::check_file_rotation(path, meta)? {
+                meta.file_position = 0;
             }
 
-            if !line.trim().is_empty() {
-                match serde_json::from_str::<NginxLogEntry>(&line) {
-                    Ok(entry) => {
-                        if let Ok(duration) = entry.nginx.time.request.parse::<f64>() {
-                            let labels = MetricLabels {
-                                method: entry.nginx.access.method,
-                                path: entry.nginx.access.url,
-                                status_code: get_status_label(entry.http.response.status_code)?
-                                    .to_string(),
-                                host: entry.nginx.access.host,
-                            };
-                            self.metrics
-                                .entry(labels)
-                                .or_insert_with(Vec::new)
-                                .push(duration);
+            let file = OpenOptions::new()
+                .read(true)
+                .open(path)
+                .map_err(|e| format!("Failed to open log file: {}", e))?;
+
+            let mut reader = BufReader::new(file);
+
+            reader
+                .seek(SeekFrom::Start(meta.file_position))
+                .map_err(|e| format!("Failed to seek to position: {}", e))?;
+
+            let mut line = String::new();
+
+            loop {
+                let bytes_read = reader
+                    .read_line(&mut line)
+                    .map_err(|e| format!("Failed to read line: {}", e))?;
+
+                if bytes_read == 0 {
+                    break;
+                }
+
+                if !line.trim().is_empty() {
+                    match serde_json::from_str::<NginxLogEntry>(&line) {
+                        Ok(entry) => {
+                            if let Ok(duration) = entry.nginx.time.request.parse::<f64>() {
+                                let labels = MetricLabels {
+                                    method: entry.nginx.access.method,
+                                    path: entry.nginx.access.url,
+                                    status_code: get_status_label(entry.http.response.status_code)?
+                                        .to_string(),
+                                    host: entry.nginx.access.host,
+                                };
+                                self.metrics
+                                    .entry(labels)
+                                    .or_insert_with(Vec::new)
+                                    .push(duration);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse log line: {} - Error: {}", line.trim(), e);
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to parse log line: {} - Error: {}", line.trim(), e);
-                    }
                 }
-            }
 
-            self.file_position += bytes_read as u64;
-            line.clear();
+                meta.file_position += bytes_read as u64;
+                line.clear();
+            }
         }
 
         Ok(self.metrics.clone())
@@ -186,6 +235,15 @@ fn calculate_histogram_buckets(data: &[f64], buckets: &[f64]) -> Vec<usize> {
 async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String) {
     let mut state = state.lock().unwrap();
 
+    state.update_files_map();
+
+    let buckets = exponential_buckets(0.05, 2.0, 10);
+
+    let mut output: Vec<String> = vec![
+        "# HELP nginx_http_request_duration_seconds Request duration in seconds".to_string(),
+        "# TYPE nginx_http_request_duration_seconds histogram".to_string(),
+    ];
+
     let metrics_map = match state.read_new_entries() {
         Ok(m) => m,
         Err(e) => {
@@ -196,13 +254,6 @@ async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String
             );
         }
     };
-
-    let buckets = exponential_buckets(0.05, 2.0, 10);
-
-    let mut output: Vec<String> = vec![
-        "# HELP nginx_http_request_duration_seconds Request duration in seconds".to_string(),
-        "# TYPE nginx_http_request_duration_seconds histogram".to_string(),
-    ];
 
     for (labels, durations) in metrics_map.iter() {
         let sum: f64 = durations.iter().sum();
@@ -248,6 +299,14 @@ async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String
     (StatusCode::OK, output.join("\n"))
 }
 
+async fn custom_header_middleware<B>(mut response: Response<B>) -> Response<B> {
+    response.headers_mut().insert(
+        "X-Powered-By",
+        HeaderValue::from_static("nginx-prometheus-exporter"),
+    );
+    response
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -258,13 +317,15 @@ async fn main() {
 
     let state = Arc::new(Mutex::new(MetricsState::new(args.log_path)));
 
-    let app = Router::new().route(
-        "/metrics",
-        get({
-            let state = Arc::clone(&state);
-            move || metrics_handler(state)
-        }),
-    );
+    let app = Router::new()
+        .route(
+            "/metrics",
+            get({
+                let state = Arc::clone(&state);
+                move || metrics_handler(state)
+            }),
+        )
+        .layer(middleware::map_response(custom_header_middleware));
 
     let addr = format!("0.0.0.0:{}", args.port);
     let listener = tokio::net::TcpListener::bind(&addr)
