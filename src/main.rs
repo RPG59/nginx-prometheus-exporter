@@ -2,6 +2,7 @@ use axum::middleware;
 use axum::{http::HeaderValue, http::StatusCode, response::Response, routing::get, Router};
 use clap::Parser;
 use glob::glob;
+use log::{debug, error, info, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -10,19 +11,13 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/*
-TODO:
-- logger
-- version command
- */
-
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Nginx Prometheus Exporter", long_about = None)]
+#[command(author, version = env!("CARGO_PKG_VERSION"), about = "Nginx Prometheus Exporter by Frontend Infra Team", long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "./docker/logs/*.log")]
+    #[arg(short, long, default_value = "/var/log/nginx/*.log")]
     log_path: String,
 
-    #[arg(short, long, default_value = "6969")]
+    #[arg(short, long, default_value = "9090")]
     port: u16,
 }
 
@@ -104,6 +99,20 @@ impl MetricsState {
     }
 
     fn update_files_map(&mut self) {
+        let entities = glob(&self.pattern)
+            .expect("Failed to read glob pattern")
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        let current_wath_file_pathes: Vec<_> = self.log_files.keys().cloned().collect();
+
+        for path in current_wath_file_pathes {
+            if !entities.contains(&path) {
+                debug!("Remove file {} from watch", path.to_string_lossy());
+                self.log_files.remove(&path);
+            }
+        }
+
         for entry in glob(&self.pattern).expect("Failed to read glob pattern") {
             match entry {
                 Ok(path) => {
@@ -113,6 +122,8 @@ impl MetricsState {
 
                     let inode = std::fs::metadata(&path).unwrap().ino();
 
+                    debug!("Add file {} to watch", path.to_string_lossy());
+
                     self.log_files.insert(
                         path,
                         LogFileMeta {
@@ -121,38 +132,54 @@ impl MetricsState {
                         },
                     );
                 }
-                Err(e) => println!("{:?}", e),
+                Err(e) => error!("{:?}", e),
             }
         }
     }
 
-    fn check_file_rotation(path: &PathBuf, meta: &LogFileMeta) -> Result<bool, String> {
+    fn handle_file_rotation(path: &PathBuf, meta: &mut LogFileMeta) -> Result<(), String> {
         let metadata =
             std::fs::metadata(path).map_err(|e| format!("Failed to get file metadata: {}", e))?;
 
-        if meta.inode != metadata.ino() || meta.file_position > metadata.len() {
-            return Ok(true);
+        let inode = metadata.ino();
+
+        if meta.inode != inode || meta.file_position > metadata.len() {
+            debug!("Rotation file {} detected", path.to_string_lossy());
+
+            meta.file_position = 0;
+            meta.inode = inode;
         }
 
-        Ok(false)
+        Ok(())
     }
 
     fn read_new_entries(&mut self) -> Result<HashMap<MetricLabels, Vec<f64>>, String> {
         for (path, meta) in &mut self.log_files {
-            if MetricsState::check_file_rotation(path, meta)? {
-                meta.file_position = 0;
+            if !path.exists() {
+                warn!("Failed to find file {}. Skipped", path.to_string_lossy());
+                continue;
             }
 
-            let file = OpenOptions::new()
-                .read(true)
-                .open(path)
-                .map_err(|e| format!("Failed to open log file: {}", e))?;
+            if let Err(e) = MetricsState::handle_file_rotation(path, meta) {
+                error!("{}", e);
+                continue;
+            }
+
+            let file = OpenOptions::new().read(true).open(path).map_err(|e| {
+                format!("Failed to open log file {}: {}", path.to_string_lossy(), e)
+            })?;
 
             let mut reader = BufReader::new(file);
 
             reader
                 .seek(SeekFrom::Start(meta.file_position))
-                .map_err(|e| format!("Failed to seek to position: {}", e))?;
+                .map_err(|e| {
+                    format!(
+                        "Failed to seek to position in file {}: {}",
+                        path.to_string_lossy(),
+                        e
+                    )
+                })?;
 
             let mut line = String::new();
 
@@ -183,7 +210,7 @@ impl MetricsState {
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to parse log line: {} - Error: {}", line.trim(), e);
+                            error!("Failed to parse log line: {} - Error: {}", line.trim(), e);
                         }
                     }
                 }
@@ -195,15 +222,6 @@ impl MetricsState {
 
         Ok(self.metrics.clone())
     }
-}
-
-fn calculate_quantile(sorted_data: &[f64], quantile: f64) -> f64 {
-    if sorted_data.is_empty() {
-        return 0.0;
-    }
-
-    let index = (quantile * (sorted_data.len() - 1) as f64).round() as usize;
-    sorted_data[index]
 }
 
 fn exponential_buckets(start: f64, factor: f64, count: usize) -> Vec<f64> {
@@ -237,7 +255,7 @@ async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String
 
     state.update_files_map();
 
-    let buckets = exponential_buckets(0.05, 2.0, 10);
+    let buckets = exponential_buckets(0.005, 2.0, 10);
 
     let mut output: Vec<String> = vec![
         "# HELP nginx_http_request_duration_seconds Request duration in seconds".to_string(),
@@ -247,7 +265,7 @@ async fn metrics_handler(state: Arc<Mutex<MetricsState>>) -> (StatusCode, String
     let metrics_map = match state.read_new_entries() {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("Error reading log entries: {}", e);
+            error!("Error reading log entries: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("# Error: {}\n", e),
@@ -309,11 +327,12 @@ async fn custom_header_middleware<B>(mut response: Response<B>) -> Response<B> {
 
 #[tokio::main]
 async fn main() {
+    env_logger::init_from_env(env_logger::Env::default().filter_or("LOG_LEVEL", "info"));
+
     let args = Args::parse();
 
-    println!("Starting Nginx Prometheus Exporter");
-    println!("Log file: {:?}", args.log_path);
-    println!("Server port: {}", args.port);
+    info!("Starting Nginx Prometheus Exporter");
+    info!("Log file: {:?}", args.log_path);
 
     let state = Arc::new(Mutex::new(MetricsState::new(args.log_path)));
 
@@ -332,7 +351,7 @@ async fn main() {
         .await
         .expect("Failed to bind to address");
 
-    println!("Server listening on {}", addr);
+    info!("Server listening on {}", addr);
 
     axum::serve(listener, app)
         .await

@@ -9,7 +9,6 @@ Prometheus exporter for nginx metrics that reads logs in JSON format and provide
 - Calculate `nginx_http_request_duration_seconds` metrics:
   - `_sum` - total time of all requests
   - `_count` - number of requests
-  - Quantiles: p50, p90, p95, p99
 - Configurable log file path and server port
 
 ## Build
@@ -44,7 +43,7 @@ or
 
 ### Command line parameters
 
-- `-l, --log-path <LOG_PATH>` - path to nginx log file (default: `/var/log/nginx/access.log`)
+- `-l, --log-path <LOG_PATH>` - path-pattern to nginx access-log files (default: `/var/log/nginx/*.log`)
 - `-p, --port <PORT>` - HTTP server port (default: `9090`)
 - `-h, --help` - show help
 - `-V, --version` - show version
@@ -69,10 +68,6 @@ nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status
 nginx_http_request_duration_seconds_bucket{method="GET",path="/api/users",status_code="2xx",host="api.example.com",le="+Inf"} 3
 nginx_http_request_duration_seconds_sum{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.475
 nginx_http_request_duration_seconds_count{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 3
-nginx_http_request_duration_seconds_p50{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.15
-nginx_http_request_duration_seconds_p90{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.2
-nginx_http_request_duration_seconds_p95{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.2
-nginx_http_request_duration_seconds_p99{method="GET",path="/api/users",status_code="2xx",host="api.example.com"} 0.2
 ```
 
 ### Labels
@@ -89,7 +84,6 @@ For each label combination, the exporter provides:
 - **Histogram buckets** (`_bucket`) - exponential distribution with buckets [0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, +Inf] seconds
 - **Sum** (`_sum`) - total time of all requests
 - **Count** (`_count`) - number of requests
-- **Percentiles** (`_p50`, `_p90`, `_p95`, `_p99`) - quantiles of response time distribution
 
 ## Nginx log format
 
