@@ -27,7 +27,7 @@ cargo run --release
 
 Defaults:
 - Log path: `/var/log/nginx/access.log`
-- Server port: `9090`
+- Server port: `9113`
 
 ### Run with custom parameters
 
@@ -44,7 +44,7 @@ or
 ### Command line parameters
 
 - `-l, --log-path <LOG_PATH>` - path-pattern to nginx access-log files (default: `/var/log/nginx/*.log`)
-- `-p, --port <PORT>` - HTTP server port (default: `9090`)
+- `-p, --port <PORT>` - HTTP server port (default: `9113`)
 - `-h, --help` - show help
 - `-V, --version` - show version
 
@@ -112,7 +112,7 @@ Add to `prometheus.yml`:
 scrape_configs:
   - job_name: 'nginx-exporter'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['localhost:9113']
 ```
 
 ## Architecture

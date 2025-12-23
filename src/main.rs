@@ -17,7 +17,7 @@ struct Args {
     #[arg(short, long, default_value = "/var/log/nginx/*.log")]
     log_path: String,
 
-    #[arg(short, long, default_value = "9090")]
+    #[arg(short, long, default_value = "9113")]
     port: u16,
 }
 
