@@ -121,5 +121,4 @@ scrape_configs:
 - **JSON parsing**: uses `serde_json` to parse nginx logs and extract necessary fields (method, path, status_code, host, request_time)
 - **Label grouping**: metrics are grouped by unique label combinations (method, path, status_code, host) using HashMap
 - **Histogram buckets**: uses exponential bucket distribution (ExponentialBuckets) with initial value 0.005s, factor 2.0 and 10 buckets, giving a range from 5ms to 2.56s
-- **Quantile calculation**: quantiles (p50, p90, p95, p99) are calculated based on sorted data from the current set of new entries for each label group
 - **Asynchronous HTTP server**: built on `axum` and `tokio`
